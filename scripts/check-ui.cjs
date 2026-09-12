@@ -1,0 +1,60 @@
+require('./register.cjs');
+const assert=require('node:assert/strict');
+const {JSDOM}=require('jsdom');
+const dom=new JSDOM('<!doctype html><html><body><div id="root"></div></body></html>',{url:'https://unit-test.invalid'});
+const NodeFile=global.File;const NodeBlob=global.Blob;
+global.window=dom.window;global.document=dom.window.document;Object.defineProperty(global,'navigator',{value:dom.window.navigator,configurable:true});global.HTMLElement=dom.window.HTMLElement;global.localStorage=dom.window.localStorage;global.IS_REACT_ACT_ENVIRONMENT=true;
+window.scrollTo=()=>{};window.speechSynthesis={cancel(){},getVoices(){return[];}};global.speechSynthesis=window.speechSynthesis;window.confirm=()=>true;
+global.File=NodeFile;global.Blob=NodeBlob;
+let urlCount=0;const revoked=[];global.URL.createObjectURL=()=>`blob:test-${++urlCount}`;global.URL.revokeObjectURL=url=>revoked.push(url);
+global.Image=class{naturalWidth=1400;naturalHeight=1900;set src(value){assert.ok(value);queueMicrotask(()=>this.onload?.());}};
+global.FileReader=class{readAsDataURL(file){file.arrayBuffer().then(bytes=>{this.result=`data:${file.type};base64,${Buffer.from(bytes).toString('base64')}`;this.onload?.();});}};
+dom.window.HTMLDialogElement.prototype.showModal=function(){this.setAttribute('open','');};dom.window.HTMLDialogElement.prototype.close=function(){this.removeAttribute('open');};
+let stopped=0;let cameraRequests=0;Object.defineProperty(window,'isSecureContext',{value:true});Object.defineProperty(navigator,'mediaDevices',{value:{async getUserMedia(options){cameraRequests++;assert.equal(options.audio,false);return {getTracks:()=>[{stop(){stopped++;}}]};}}});
+dom.window.HTMLMediaElement.prototype.play=async()=>{};
+dom.window.HTMLCanvasElement.prototype.getContext=()=>({drawImage(){},fillRect(){},fillStyle:''});
+dom.window.HTMLCanvasElement.prototype.toBlob=function(callback){callback(new NodeBlob([Uint8Array.from([255,216,255,0,0])],{type:'image/jpeg'}));};
+const {fallbackResult}=require('../lib/explanations.ts');const {tr}=require('../lib/i18n.ts');
+const fetches=[];global.fetch=async(url,options)=>{if(!options?.method)return new Response(JSON.stringify({aiAvailable:true}));const body=JSON.parse(options.body);fetches.push(body);return new Response(JSON.stringify(body.rows?fallbackResult(body.rows,body.language):{extracted:[{nameAsPrinted:'Hemoglobin',value:13.8,unit:'g/dL',printedRange:'12-16'}],unreadableCount:0}),{headers:{'Content-Type':'application/json'}});};
+const React=require('react');const {createRoot}=require('react-dom/client');const App=require('../app/page.tsx').default;
+const root=createRoot(document.getElementById('root'));
+const act=React.act;const flush=()=>act(async()=>{await new Promise(resolve=>setTimeout(resolve,0));});
+const buttons=()=>[...document.querySelectorAll('button')];
+const button=text=>{const b=buttons().find(b=>b.textContent.trim()===text);assert.ok(b,`Missing button: ${text}`);return b;};
+const click=async b=>{await act(async()=>b.dispatchEvent(new window.MouseEvent('click',{bubbles:true})));await flush();};
+const selectLanguage=async lang=>{const select=document.querySelector('.topbar select');await act(async()=>{select.value=lang;select.dispatchEvent(new window.Event('change',{bubbles:true}));});await flush();};
+const errors=[];const originalError=console.error;console.error=(...args)=>{errors.push(args.join(' '));};
+(async()=>{try{
+ await act(async()=>root.render(React.createElement(App)));await flush();
+ assert.equal(document.querySelector('.page-navigation button').disabled,true);
+ assert.ok(!/try demo|demo mode|sample report/i.test(document.body.textContent));
+ await click(button('Upload Report'));
+ const uploadInput=document.querySelector('input[type=file]');
+ // A camera image with an empty MIME label must be detected from its bytes.
+ const file=new NodeFile([Uint8Array.from([255,216,255,0,0,0])],'photo.jpg',{type:''});
+ Object.defineProperty(uploadInput,'files',{value:[file],configurable:true});
+ await act(async()=>uploadInput.dispatchEvent(new window.Event('change',{bubbles:true})));await flush();
+ const img=document.querySelector('.file-preview img');assert.ok(img);assert.ok(img.getAttribute('src').startsWith('blob:'));assert.equal(document.querySelectorAll('img[src=""]').length,0);
+ assert.equal(button('Read Report').disabled,true);
+ const consent=document.querySelector('.check input');await click(consent);assert.equal(button('Read Report').disabled,false);
+ await click(button('Read Report'));assert.ok(document.body.textContent.includes('Verify extracted information'));assert.equal(fetches[0].mimeType,'image/jpeg');
+ await click(button('Confirm & Explain'));assert.ok(document.body.textContent.includes('Your Report'));assert.ok(document.querySelector('.result-row'));
+ for(const language of ['Hindi','Tamil','Kannada','Assamese']){
+  await selectLanguage(language);assert.equal(document.documentElement.lang,({'Hindi':'hi-IN','Tamil':'ta-IN','Kannada':'kn-IN','Assamese':'as-IN'})[language]);
+  assert.ok(document.querySelector('h1').textContent.includes(tr(language,'report')));assert.ok(document.querySelector('.result-row').textContent.includes(tr(language,'normal')));
+  await click(button(tr(language,'questions')));assert.ok(document.body.textContent.includes(tr(language,'questionRepeat')));assert.ok(!document.body.textContent.includes('Follow-up'));
+  await click(button(tr(language,'settings')));assert.ok(document.body.textContent.includes(tr(language,'saveLocalText')));assert.ok(!document.body.textContent.includes('Save results on this device'));
+  await click(button(tr(language,'dashboard')));
+ }
+ await selectLanguage('English');
+ await click(button('Report History'));assert.ok(document.querySelector('.history-row'));
+ await click(document.querySelector('.page-navigation button'));assert.ok(document.querySelector('h1').textContent.includes('Your Report'));
+ await click(document.querySelectorAll('.page-navigation button')[1]);assert.ok(document.querySelector('h1').textContent.includes('Report History'));
+ await click(button('Upload Report'));await click(button('Scan Report'));assert.equal(cameraRequests,1);assert.ok(document.querySelector('video'));await click(button('Close Camera'));assert.equal(stopped,1);assert.equal(document.querySelector('video'),null);
+ await click(button('Scan Report'));const liveVideo=document.querySelector('video');Object.defineProperty(liveVideo,'videoWidth',{value:1600});Object.defineProperty(liveVideo,'videoHeight',{value:2200});await act(async()=>liveVideo.dispatchEvent(new window.Event('canplay')));await click(button('Take Photo'));assert.equal(stopped,2);assert.equal(document.querySelector('video'),null);assert.ok(document.querySelector('.file-preview img').getAttribute('src'));assert.ok(document.body.textContent.includes('Camera report'));
+ await click(button('Remove'));assert.equal(document.querySelector('.file-preview img'),null);assert.ok(revoked.length>0);
+ assert.equal(document.querySelectorAll('img[src=""]').length,0);
+ assert.ok(!errors.some(e=>/empty string|src attribute|uncaught|error boundary/i.test(e)),errors.join('\n'));
+ console.log('UI regression checks passed: empty-MIME upload, no empty image src, consent, extraction review, results, all five languages, questions/settings translation, Back/Forward history, camera start/capture/stop and preview cleanup. DOM/media simulated; no browser or real OpenRouter calls.');
+ }finally{await act(async()=>root.unmount());console.error=originalError;dom.window.close();}
+})().catch(e=>{originalError(e);process.exitCode=1;});
